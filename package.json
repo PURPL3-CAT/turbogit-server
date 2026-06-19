@@ -1,0 +1,26 @@
+{
+  "name": "turbogit-server",
+  "version": "1.0.0",
+  "description": "Server-side version of TurboGit just for compilation and deployment.",
+  "main": "index.js",
+  "bin": {
+    "turbogit-server": "./bin/turbogit-server.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PURPL3-CAT/turbogit-server.git"
+  },
+  "author": "PURPL3-CAT",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/PURPL3-CAT/turbogit-server/issues"
+  },
+  "homepage": "https://github.com/PURPL3-CAT/turbogit-server",
+  "dependencies": {
+    "@turbowarp/packager": "^3.13.0",
+    "jszip": "^3.10.1"
+  }
+}
