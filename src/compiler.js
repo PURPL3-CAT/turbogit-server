@@ -54,6 +54,104 @@ const md5 = async (data) => {
   return crypto.createHash('md5').update(data).digest('hex');
 };
 
+const normalizeScratchVariables = (input) => {
+  if (!input || typeof input !== 'object') return {};
+  if (Array.isArray(input)) {
+    return input.reduce((acc, item) => {
+      if (item && typeof item === 'object') {
+        const id = item.id ?? item.name;
+        if (id) {
+          acc[id] = [item.name ?? id, item.value ?? null];
+        }
+      }
+      return acc;
+    }, {});
+  }
+
+  return Object.entries(input).reduce((acc, [key, value]) => {
+    if (Array.isArray(value)) {
+      acc[key] = value;
+    } else if (value && typeof value === 'object') {
+      acc[key] = [value.name ?? key, value.value ?? null];
+    }
+    return acc;
+  }, {});
+};
+
+const normalizeScratchLists = (input) => {
+  if (!input || typeof input !== 'object') return {};
+  if (Array.isArray(input)) {
+    return input.reduce((acc, item) => {
+      if (item && typeof item === 'object') {
+        const id = item.id ?? item.name;
+        if (id) {
+          acc[id] = Array.isArray(item.value) ? item.value : [];
+        }
+      }
+      return acc;
+    }, {});
+  }
+  return input;
+};
+
+const normalizeScratchBroadcasts = (input) => {
+  if (!input || typeof input !== 'object') return {};
+  if (Array.isArray(input)) {
+    return input.reduce((acc, item) => {
+      if (item && typeof item === 'object') {
+        const id = item.id ?? item.name;
+        if (id) {
+          acc[id] = item.name ?? id;
+        }
+      }
+      return acc;
+    }, {});
+  }
+  return input;
+};
+
+const sanitizeFileName = (value) => {
+  if (typeof value !== 'string') return '';
+  return value
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/^[.]+/, '')
+    .trim();
+};
+
+const decodeFileName = (value) => {
+  return typeof value === 'string' ? value : '';
+};
+
+const loadJsonFileIfExists = async (dir, filename) => {
+  const filePath = await getFileIfExists(dir, filename);
+  if (!filePath) return null;
+  try {
+    return JSON.parse(await fs.readFile(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+};
+
+const loadTargetVariables = async (spriteDir) => {
+  const variablesJson = await loadJsonFileIfExists(spriteDir, 'variables.json');
+  const listsJson = await loadJsonFileIfExists(spriteDir, 'lists.json');
+  const broadcastsJson = await loadJsonFileIfExists(spriteDir, 'broadcasts.json');
+
+  return {
+    targetVariables: normalizeScratchVariables(variablesJson || {}),
+    targetLists: normalizeScratchLists(listsJson || {}),
+    targetBroadcasts: normalizeScratchBroadcasts(broadcastsJson || {}),
+  };
+};
+
+const createZip = async (entries) => {
+  const zip = new JSZip();
+  for (const [name, data] of Object.entries(entries)) {
+    zip.file(name, data);
+  }
+  return zip.generateAsync({ type: 'nodebuffer' });
+};
+
 const normalizeBlocks = (blocks) => {
   if (!blocks || typeof blocks !== 'object') return;
 
@@ -149,6 +247,7 @@ const compileToSb3 = async (root) => {
       vm: '0.2.0',
       agent: 'custom',
     },
+    extensionStorage: {},
     targets: [],
     monitors: [],
     extensions: [],
@@ -158,22 +257,31 @@ const compileToSb3 = async (root) => {
   if (extensionsFile) {
     try {
       const extensionsText = await fs.readFile(extensionsFile, 'utf8');
-      const extensionSources = JSON.parse(extensionsText);
-      if (Array.isArray(extensionSources)) {
-        project.extensions = extensionSources;
-      } else {
-        console.warn('[TurboGit] extensions.json did not contain an array, ignoring');
-      }
+      const parsed = JSON.parse(extensionsText);
+      project.extensions = Array.isArray(parsed.extensionSources)
+        ? parsed.extensionSources
+        : [];
+      project.extensionStorage = parsed.extensionStorage || {};
     } catch (err) {
-      console.warn('[TurboGit] failed to read extensions.json, ignoring', err);
+      console.error('[TurboGit] failed to read extensions.json', err);
+      throw err;
     }
   }
+
+  const filteredExtensionSources = project.extensions.filter(
+    (src) =>
+      typeof src === 'string' &&
+      !src.toLowerCase().includes('vhvyrm9hit') &&
+      !src.toLowerCase().includes('turbogit'),
+  );
+
+  project.extensions = filteredExtensionSources;
 
   const assets = [];
 
   for (const { name: spriteName, path: spriteDir } of spriteDirs) {
     const blocksText = await readTextFile(spriteDir, 'blocks.json');
-    const { blocks } = JSON.parse(blocksText);
+    const { blocks, scripts = [] } = JSON.parse(blocksText);
 
     try {
       normalizeBlocks(blocks);
@@ -181,25 +289,27 @@ const compileToSb3 = async (root) => {
       console.warn(`[TurboGit] failed to normalize blocks for ${spriteName}`, err);
     }
 
+    let comments = {};
+    try {
+      const commentsJson = await loadJsonFileIfExists(spriteDir, 'comments.json');
+      comments = commentsJson || {};
+    } catch {
+      comments = {};
+    }
+
     const costumesDir = await getDirIfExists(spriteDir, 'costumes');
     if (!costumesDir) {
       throw new Error(`Missing costumes directory for sprite ${spriteName}`);
     }
 
-    let costumeMeta;
-    const costumeMetaFile = await getFileIfExists(costumesDir, 'costumes.json');
-    if (costumeMetaFile) {
-      costumeMeta = JSON.parse(await fs.readFile(costumeMetaFile, 'utf8'));
-      if (!Array.isArray(costumeMeta)) {
-        throw new Error(`Invalid costumes.json in ${spriteName}`);
-      }
-    } else {
+    let costumeMeta = await loadJsonFileIfExists(costumesDir, 'costumes.json');
+    if (!Array.isArray(costumeMeta)) {
       costumeMeta = await inferCostumeMeta(costumesDir);
     }
 
     const costumes = [];
     for (const meta of costumeMeta) {
-      const filename = `${meta.name}.${meta.dataFormat}`;
+      const filename = `${sanitizeFileName(meta.name)}.${meta.dataFormat}`;
       const data = await readBinaryFile(costumesDir, filename);
       const assetId = await md5(data);
       const md5ext = `${assetId}.${meta.dataFormat}`;
@@ -217,35 +327,36 @@ const compileToSb3 = async (root) => {
     const soundsDir = await getDirIfExists(spriteDir, 'sounds');
     let soundMeta = [];
     if (soundsDir) {
-      const soundsMetaFile = await getFileIfExists(soundsDir, 'sounds.json');
-      if (soundsMetaFile) {
-        soundMeta = JSON.parse(await fs.readFile(soundsMetaFile, 'utf8'));
-        if (!Array.isArray(soundMeta)) {
-          throw new Error(`Invalid sounds.json in ${spriteName}`);
-        }
+      const soundsJson = await loadJsonFileIfExists(soundsDir, 'sounds.json');
+      if (Array.isArray(soundsJson)) {
+        soundMeta = soundsJson;
       } else {
-        soundMeta = await inferSoundMeta(soundsDir);
+        const files = await listFiles(soundsDir);
+        soundMeta = files.map(({ name }) => {
+          const parts = name.split('.');
+          const ext = parts.pop().toLowerCase();
+          const base = parts.join('.');
+          return {
+            name: decodeFileName(base),
+            dataFormat: ext,
+            rate: 44100,
+            sampleCount: 0,
+          };
+        });
       }
     }
 
     const sounds = [];
     for (const meta of soundMeta) {
-      const candidateNames = [`${meta.name}.wav`, `${meta.name}.mp3`];
       let data;
       let ext;
 
-      for (const candidate of candidateNames) {
-        try {
-          data = await readBinaryFile(soundsDir, candidate);
-          ext = path.extname(candidate).slice(1).toLowerCase();
-          break;
-        } catch (err) {
-          // continue to next candidate
-        }
-      }
-
-      if (!data) {
-        throw new Error(`Missing sound file for ${spriteName}/${meta.name}`);
+      try {
+        ext = 'wav';
+        data = await readBinaryFile(soundsDir, `${sanitizeFileName(meta.name)}.wav`);
+      } catch {
+        ext = 'mp3';
+        data = await readBinaryFile(soundsDir, `${sanitizeFileName(meta.name)}.mp3`);
       }
 
       const assetId = await md5(data);
@@ -261,15 +372,18 @@ const compileToSb3 = async (root) => {
       });
     }
 
+    const { targetVariables, targetLists, targetBroadcasts } = await loadTargetVariables(spriteDir);
+
     const isStage = spriteName === 'Stage';
     const target = {
       isStage,
       name: spriteName,
-      variables: {},
-      lists: {},
-      broadcasts: {},
-      comments: {},
+      variables: targetVariables,
+      lists: targetLists,
+      broadcasts: targetBroadcasts,
+      comments,
       blocks,
+      scripts,
       costumes,
       sounds,
       currentCostume: 0,
@@ -279,7 +393,7 @@ const compileToSb3 = async (root) => {
       tempo: isStage ? 60 : undefined,
       videoTransparency: isStage ? 50 : undefined,
       videoState: isStage ? 'on' : undefined,
-      textToSpeechLanguage: isStage ? null : undefined,
+      textToSpeechLanguage: null,
     };
 
     if (!isStage) {
@@ -294,13 +408,15 @@ const compileToSb3 = async (root) => {
     project.targets.push(target);
   }
 
-  const zip = new JSZip();
-  zip.file('project.json', JSON.stringify(project, null, 2));
+  const entries = {
+    'project.json': JSON.stringify(project, null, 2),
+  };
+
   for (const asset of assets) {
-    zip.file(asset.md5ext, asset.data);
+    entries[asset.md5ext] = asset.data;
   }
 
-  return zip.generateAsync({ type: 'nodebuffer' });
+  return createZip(entries);
 };
 
 module.exports = {

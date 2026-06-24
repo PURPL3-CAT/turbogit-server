@@ -49,6 +49,28 @@ const run = async () => {
   const packager = new Packager.Packager();
   packager.project = loadedProject;
 
+  let extensionSources = [];
+  try {
+    const extensionsPath = path.join(resolvedSource, 'extensions.json');
+    const text = await fs.readFile(extensionsPath, 'utf8');
+    const parsed = JSON.parse(text);
+    extensionSources = Array.isArray(parsed.extensionSources)
+      ? parsed.extensionSources
+      : Array.isArray(parsed)
+      ? parsed
+      : [];
+  } catch (err) {
+    // no extensions to load or invalid file
+    extensionSources = [];
+  }
+
+  packager.options.extensions = extensionSources.filter(
+    (src) => typeof src === 'string',
+  );
+  if (packager.options.extensions.length > 0) {
+    log('Packager extension URLs:', packager.options.extensions);
+  }
+
   const result = await packager.package();
   if (result.type !== 'text/html') {
     error(`Unexpected packager output type: ${result.type}`);
